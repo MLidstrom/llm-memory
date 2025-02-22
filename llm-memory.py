@@ -1,13 +1,20 @@
+import os
 from datetime import datetime
 
 import numpy as np
 import ollama
+from dotenv import load_dotenv
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 
-# Initialize Pinecone
-pinecone_api_key = "pcsk_Nit2C_Tpp2Kr3nYESMLdjBAY5nCPrGPEBdNh1gNGtcPcRLn7g8aFFnbfX4HoMeKBJgDvv"
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize Pinecone with API key
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+if not pinecone_api_key:
+    raise ValueError("PINECONE_API_KEY not found in .env file")
 pc = Pinecone(api_key=pinecone_api_key)
 
 # Create or connect to a Pinecone index
