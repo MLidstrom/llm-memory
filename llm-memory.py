@@ -1,15 +1,20 @@
 import os
 from datetime import datetime
 
+import nltk
 import numpy as np
 import ollama
 from dotenv import load_dotenv
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from pinecone import Pinecone, ServerlessSpec
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Download VADER lexicon if not already available
+nltk.download('vader_lexicon', quiet=True)
 
 # Initialize Pinecone with API key
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -40,15 +45,20 @@ def calculate_decay_factor(timestamp, half_life_days=30):
     decay = np.exp(-time_diff / half_life_days)  # Exponential decay
     return decay
 
-# Function to determine importance (simplified example)
+# Function to determine importance using VADER sentiment analysis
 def calculate_importance(user_input, response):
-    # Example: Importance based on keywords or length (could use sentiment analysis or user tagging)
-    keywords = ["important", "urgent", "love", "hate", "remember"]
-    base_importance = 1.0
-    for keyword in keywords:
-        if keyword in user_input.lower() or keyword in response.lower():
-            base_importance += 1.0
-    return min(base_importance, 5.0)  # Cap at 5 for simplicity
+    # Use VADER sentiment analyzer
+    sid = SentimentIntensityAnalyzer()
+    
+    # Get sentiment scores
+    user_sentiment = sid.polarity_scores(user_input)
+    response_sentiment = sid.polarity_scores(response)
+    
+    # Use the compound score which is normalized between -1 and 1
+    # Average the sentiment of both user input and response
+    importance = (user_sentiment['compound'] + response_sentiment['compound']) / 2
+    
+    return importance  # Returns value between -1 and 1
 
 # Store conversation with decay and importance
 def store_conversation(user_input, response):
@@ -108,7 +118,7 @@ def get_response_with_memory(user_input):
     prompt = f"Previous conversation (faded by time, stronger if important):\n{context}\n\nUser: {user_input}\nAI:"
     
     response = ollama.chat(
-        model="llama3.1:latest",
+        model="llama3.2:latest",
         messages=[{"role": "user", "content": prompt}]
     )
     
