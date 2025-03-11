@@ -27,7 +27,7 @@ index_name = "human-memory"
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=384,  # Matches 'sentence-transformers/all-MiniLM-L6-v2'
+        dimension=384,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
@@ -38,102 +38,109 @@ pinecone_index = pc.Index(index_name)
 embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vector_store = PineconeVectorStore(index=pinecone_index, embedding=embedding_model, text_key="text")
 
+current_user_identity = "unknown"
+
+# Extract user identity explicitly from LLM
+def get_user_identity(user_input):
+    prompt = f"Given the following input from a user, what's the user's name? " \
+             f"If the name isn't explicitly provided, answer 'unknown'.\n\n" \
+             f"User Input: {user_input}\nUser Name:"
+
+    response = ollama.chat(
+        model="llama3.2:latest",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    user_identity = response["message"]["content"].strip()
+
+    return user_identity if user_identity else "unknown"
+
 # Exponential decay function for memory degradation
-def calculate_decay_factor(timestamp, half_life_days=30):
+def calculate_decay_factor(timestamp, half_life_days=90):
     now = datetime.now()
-    time_diff = (now - datetime.fromisoformat(timestamp)).total_seconds() / (24 * 3600)  # Days
-    decay = np.exp(-time_diff / half_life_days)  # Exponential decay
-    return decay
+    time_diff = (now - datetime.fromisoformat(timestamp)).total_seconds() / (24 * 3600)
+    return np.exp(-time_diff / half_life_days)
 
 # Function to determine importance using VADER sentiment analysis
 def calculate_importance(user_input, response):
-    # Use VADER sentiment analyzer
     sid = SentimentIntensityAnalyzer()
-    
-    # Get sentiment scores
     user_sentiment = sid.polarity_scores(user_input)
     response_sentiment = sid.polarity_scores(response)
-    
-    # Use the compound score which is normalized between -1 and 1
-    # Average the sentiment of both user input and response
     importance = (user_sentiment['compound'] + response_sentiment['compound']) / 2
-    
-    return importance  # Returns value between -1 and 1
+    return importance
 
-# Store conversation with decay and importance
-def store_conversation(user_input, response):
+# Store conversation with identity metadata
+def store_conversation(user_input, response, user_identity="unknown"):
     conversation_text = f"User: {user_input}\nAI: {response}"
     importance = calculate_importance(user_input, response)
     timestamp = datetime.now().isoformat()
-    
+
     metadata = {
         "text": conversation_text,
         "timestamp": timestamp,
-        "importance": importance
+        "importance": importance,
+        "user_identity": user_identity
     }
-    
-    # Embed the text
+
     embedding = embedding_model.embed_documents([conversation_text])[0]
-    # Amplify embedding based on importance (optional, for stronger imprint)
     amplified_embedding = [v * importance for v in embedding]
-    
-    # Store in Pinecone with unique ID
+
     vector_store.add_texts(
         texts=[conversation_text],
         embeddings=[amplified_embedding],
         metadatas=[metadata]
     )
 
-# Retrieve context with decay and importance weighting
-def retrieve_context(query, max_results=3, decay_threshold=0.1):
-    # Perform similarity search
-    results = vector_store.similarity_search_with_score(query, k=max_results * 2)  # Get extra results to filter
-    
-    # Filter and weight results
+# Retrieve context from vector store
+def retrieve_context(query, max_results=3, decay_threshold=0.05):
+    results = vector_store.similarity_search_with_score(query=query, k=max_results * 2)
+
     weighted_results = []
     for doc, score in results:
         metadata = doc.metadata
-        timestamp = metadata["timestamp"]
-        importance = metadata.get("importance", 1.0)
-        
-        # Calculate decay factor
-        decay_factor = calculate_decay_factor(timestamp)
-        
-        # Weight the similarity score by decay and importance
-        weighted_score = score * decay_factor * importance
-        
-        if weighted_score > decay_threshold:  # Filter out highly decayed memories
+        decay_factor = calculate_decay_factor(metadata["timestamp"])
+        weighted_score = score * decay_factor * metadata.get("importance", 1.0)
+
+        if weighted_score > decay_threshold:
             weighted_results.append((doc, weighted_score))
-    
-    # Sort by weighted score and take top results
+
     weighted_results.sort(key=lambda x: x[1], reverse=True)
     top_results = weighted_results[:max_results]
-    
+
     context = "\n".join([doc.page_content for doc, _ in top_results])
     return context
 
-# Get response with memory
+# Get response with memory and identity tracking
+current_user_identity = "unknown"
+
 def get_response_with_memory(user_input):
+    global current_user_identity
+
+    if current_user_identity == "unknown":
+        detected_identity = get_user_identity(user_input)
+        if detected_identity != "unknown":
+            current_user_identity = detected_identity
+
     context = retrieve_context(user_input)
-    prompt = f"Previous conversation (faded by time, stronger if important):\n{context}\n\nUser: {user_input}\nAI:"
-    
+    prompt = f"Previous conversation (context):\n{context}\n\nUser: {user_input}\nAI:"
+
     response = ollama.chat(
         model="llama3.2:latest",
         messages=[{"role": "user", "content": prompt}]
     )
-    
+
     ai_response = response["message"]["content"]
-    store_conversation(user_input, ai_response)
+    store_conversation(user_input, ai_response, current_user_identity)
     return ai_response
 
-# Chat loop
+# Main chat loop
 def chat():
     print("Start chatting (type 'exit' to stop):")
     while True:
-        user_input = input("You: ")
+        user_input = input("\n\n--------\nYou: ")
         if user_input.lower() == "exit":
             break
-        
+
         response = get_response_with_memory(user_input)
         print(f"AI: {response}")
 
