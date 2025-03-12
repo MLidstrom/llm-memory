@@ -11,6 +11,12 @@ from langchain_pinecone import PineconeVectorStore
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from pinecone import Pinecone, ServerlessSpec
 
+# Version information
+VERSION = "1.1.0"
+
+# Debug flag - Set to True to enable debug output, False to disable
+DEBUG = False
+
 # Download required NLTK data packages
 nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
@@ -41,18 +47,26 @@ else:
 pinecone_index = pc.Index(index_name)
 
 # Initialize embedding model
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-vector_store = PineconeVectorStore(index=pinecone_index, embedding=embedding_model, text_key="text")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+vector_store = PineconeVectorStore(
+    index=pinecone_index, 
+    embedding=embedding_model, 
+    text_key="text"
+)
 
 # Current user tracking
 current_user_identity = "unknown"
 
 # Function to explicitly get identity from LLM
 def get_user_identity(user_input):
-    prompt = f"Given the following input from a user, what's the user's name? " \
-             f"If the name isn't explicitly provided, answer 'unknown'.\n\n" \
-             f"User input: {user_input}\n\n" \
-             f"Name:"
+    prompt = (
+        f"Given the following input from a user, what's the user's name? "
+        f"If the name isn't explicitly provided, answer 'unknown'.\n\n"
+        f"User input: {user_input}\n\n"
+        f"Name:"
+    )
 
     response = ollama.chat(
         model="llama3.2:latest",
@@ -60,14 +74,16 @@ def get_user_identity(user_input):
     )
 
     identity = response["message"]["content"].strip().lower()
-    # If the response has multiple words or punctuation, just extract the first word
-    identity = identity.split()[0].strip(".,!?") if identity and identity != "unknown" else "unknown"
+    # If the response has multiple words or punctuation, extract the first word
+    identity = (identity.split()[0].strip(".,!?") 
+                if identity and identity != "unknown" else "unknown")
     return identity
 
 # Exponential decay function for memory degradation
 def calculate_decay_factor(timestamp, half_life_days=90):
     now = datetime.now()
-    time_diff = (now - datetime.fromisoformat(timestamp)).total_seconds() / (24 * 3600)  # Days
+    # Days
+    time_diff = (now - datetime.fromisoformat(timestamp)).total_seconds() / (24 * 3600)
     decay = np.exp(-time_diff / half_life_days)  # Exponential decay
     return decay
 
@@ -104,7 +120,7 @@ def store_conversation(user_input, response, user_identity="unknown"):
     # Embed the text
     embedding = embedding_model.embed_documents([conversation_text])[0]
     
-    # Amplify embedding based on importance (optional, helps important memories stand out)
+    # Amplify embedding based on importance (helps important memories stand out)
     amplified_embedding = [v * (1 + importance) for v in embedding]
     
     # Store in Pinecone with unique ID
@@ -114,25 +130,34 @@ def store_conversation(user_input, response, user_identity="unknown"):
         metadatas=[metadata]
     )
     
-    print(f"Stored conversation with importance: {importance:.2f}")
+    # Only print debug information if DEBUG flag is set
+    if DEBUG:
+        print(f"Stored conversation with importance: {importance:.2f}")
 
 # Retrieve context with decay and importance
 def retrieve_context(query, max_results=3, decay_threshold=0.05):
     # Perform similarity search
-    results = vector_store.similarity_search_with_score(query=query, k=max_results*2)  # Get more results than needed to filter
+    # Get more results than needed to filter
+    results = vector_store.similarity_search_with_score(
+        query=query, 
+        k=max_results*2
+    )
     
     # Apply decay factor to each result
     weighted_results = []
     for doc, score in results:
-        if hasattr(doc, 'metadata') and 'timestamp' in doc.metadata and 'importance' in doc.metadata:
+        if (hasattr(doc, 'metadata') and 'timestamp' in doc.metadata 
+                and 'importance' in doc.metadata):
             decay = calculate_decay_factor(doc.metadata['timestamp'])
             importance = doc.metadata['importance']
             
             # Apply both decay and importance to the relevance
             # Higher importance = slower decay
-            effective_weight = decay * (1 + importance)  # importance augments the decay rate
+            # importance augments the decay rate
+            effective_weight = decay * (1 + importance)
             
-            if effective_weight >= decay_threshold:  # Only include if above threshold
+            # Only include if above threshold
+            if effective_weight >= decay_threshold:
                 weighted_results.append((doc, effective_weight))
     
     # Sort by effective weight (descending) and take top results
@@ -159,13 +184,15 @@ def get_response_with_memory(user_input):
 
     context = retrieve_context(user_input)
 
-    # Completely neutral prompt—NO explicit mentions of memory, fading, repetition, or loops
+    # Strong explicit instructions to prevent repetitive comments
     prompt = (
-        "You are a helpful, conversational assistant named 'James'. "
-        "Below is some previous conversation history. Use this implicitly to inform your reply. "
-        "Do NOT mention memory, forgetting, repetition, or starting fresh explicitly. "
-        "If the context is empty or minimal, simply reply naturally.\n\n"
-        f"Conversation history:\n{context}\n\n"
+        f"You are a helpful and conversational assistant by the name of James. "
+        f"Below is context from past interactions."
+        f"Use this context implicitly to inform your responses. "
+        f"NEVER mention or imply that you're starting again, "
+        f"having memory issues, forgetting, repeating, or experiencing loops. "
+        f"IF there's insufficient context, simply PROCEED NATURALLY.\n\n"
+        f"Context:\n{context}\n\n"
         f"User: {user_input}\nAI:"
     )
 
@@ -175,15 +202,27 @@ def get_response_with_memory(user_input):
     )
 
     ai_response = response["message"]["content"]
-    store_conversation(user_input, ai_response, current_user_identity)
 
+    store_conversation(user_input, ai_response, current_user_identity)
     return ai_response
+
+# Version information functions
+def display_version_info():
+    print(f"Human-Like Memory Chatbot v{VERSION}")
+    print("==============================")
+    print("Using:")
+    print(f"- Pinecone Index: {index_name}")
+    print(f"- Embedding Model: sentence-transformers/all-MiniLM-L6-v2")
+    print(f"- LLM: llama3.2:latest")
+    print(f"- Debug Mode: {'Enabled' if DEBUG else 'Disabled'}")
+    print("==============================")
 
 # Main chat loop
 def chat():
-    print("Start chatting (type 'exit' to stop):")
+    display_version_info()
+    print("\nStart chatting (type 'exit' to stop):")
     while True:
-        user_input = input("\n\n--------\nYou: ")
+        user_input = input("\n--------\nYou: ")
         if user_input.lower() == "exit":
             break
 
